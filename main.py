@@ -57,6 +57,14 @@ class TransientApp(tk.Tk):
             self.geometry("1200x720")
         self.minsize(980, 600)
 
+        self._t_norm = None
+        self._V_input = None
+        self._last_T = None
+        self._crosshair_v = None
+        self._crosshair_h = None
+        self._trace_dot = None
+        self._trace_annot = None
+
         self._configure_styles()
         self._build_ui()
         self.after(150, self._on_compute)
@@ -224,6 +232,8 @@ class TransientApp(tk.Tk):
         self.canvas_mpl = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas_mpl.draw()
         self.canvas_mpl.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        self.canvas_mpl.mpl_connect("motion_notify_event", self._on_plot_hover)
+        self.canvas_mpl.mpl_connect("axes_leave_event", self._on_plot_leave)
 
         toolbar = NavigationToolbar2Tk(self.canvas_mpl, parent)
         toolbar.update()
@@ -321,6 +331,11 @@ class TransientApp(tk.Tk):
         self.ax.set_xlim(0, t_max_T)
         self.ax.legend(loc="best", fontsize=9)
         self.fig.tight_layout()
+
+        self._t_norm = t_norm
+        self._V_input = V_input
+        self._last_T = p["T"]
+        self._init_trace_artists()
         self.canvas_mpl.draw()
 
         self._param_var.set(
@@ -332,8 +347,76 @@ class TransientApp(tk.Tk):
             f"V(0, ∞)   = {p['V_steady']:.4f} V"
         )
         self._status_var.set(
-            f"Plotted {load_type} load for t ∈ [0, {t_max_T:g}T]. T = {p['T']:.3e} s"
+            f"Plotted {load_type} load for t ∈ [0, {t_max_T:g}T]. Move cursor over graph to trace values."
         )
+
+    def _init_trace_artists(self):
+        self._crosshair_v = self.ax.axvline(0, color="#64748B", linestyle="--", linewidth=0.9, visible=False)
+        self._crosshair_h = self.ax.axhline(0, color="#64748B", linestyle="--", linewidth=0.9, visible=False)
+        (self._trace_dot,) = self.ax.plot([], [], "o", color="#111827", markersize=6, zorder=5, visible=False)
+        self._trace_annot = self.ax.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(12, 12),
+            textcoords="offset points",
+            bbox=dict(boxstyle="round,pad=0.35", fc="#1B2430", ec="none", alpha=0.92),
+            color="white",
+            fontsize=8.5,
+            fontfamily="Consolas",
+            zorder=6,
+            visible=False,
+        )
+
+    def _hide_trace(self, redraw=True):
+        if self._trace_annot is None:
+            return
+        changed = self._trace_annot.get_visible()
+        for artist in (self._crosshair_v, self._crosshair_h, self._trace_dot, self._trace_annot):
+            if artist is not None:
+                artist.set_visible(False)
+        if changed and redraw:
+            self.canvas_mpl.draw_idle()
+
+    def _on_plot_hover(self, event):
+        if self._t_norm is None or event.inaxes != self.ax or event.xdata is None:
+            self._hide_trace()
+            return
+
+        n = len(self._t_norm)
+        idx = int(np.searchsorted(self._t_norm, event.xdata))
+        if idx <= 0:
+            idx = 0
+        elif idx >= n:
+            idx = n - 1
+        elif abs(event.xdata - self._t_norm[idx - 1]) <= abs(self._t_norm[idx] - event.xdata):
+            idx = idx - 1
+
+        x = float(self._t_norm[idx])
+        y = float(self._V_input[idx])
+        t_sec = x * self._last_T
+
+        self._crosshair_v.set_xdata([x, x])
+        self._crosshair_h.set_ydata([y, y])
+        self._trace_dot.set_data([x], [y])
+
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        right_side = x > xlim[0] + 0.72 * (xlim[1] - xlim[0])
+        top_side = y > ylim[0] + 0.78 * (ylim[1] - ylim[0])
+        self._trace_annot.xy = (x, y)
+        self._trace_annot.set_position((-12 if right_side else 12, -12 if top_side else 12))
+        self._trace_annot.set_ha("right" if right_side else "left")
+        self._trace_annot.set_va("top" if top_side else "bottom")
+        self._trace_annot.set_text(f"t = {x:.3f} T ({t_sec:.2e} s)\nV(0, t) = {y:.4f} V")
+
+        for artist in (self._crosshair_v, self._crosshair_h, self._trace_dot, self._trace_annot):
+            artist.set_visible(True)
+
+        self._status_var.set(f"Trace: t = {x:.3f} T ({t_sec:.3e} s) | V(0, t) = {y:.4f} V")
+        self.canvas_mpl.draw_idle()
+
+    def _on_plot_leave(self, _event):
+        self._hide_trace()
 
     def _on_save(self):
         path = filedialog.asksaveasfilename(
@@ -342,6 +425,7 @@ class TransientApp(tk.Tk):
             title="Save Plot As...",
         )
         if path:
+            self._hide_trace(redraw=False)
             self.fig.savefig(path, dpi=200, bbox_inches="tight")
             self._status_var.set(f"Plot saved -> {path}")
 
